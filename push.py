@@ -23,15 +23,14 @@ DEFAULT_TARGET_QQ = ""  # 默认群号或 QQ 号
 # 2. 如果房间不写 push_mode/target_qq，会使用成员级配置；成员也没写则使用默认配置
 MEMBERS = [
          {
-         "name": "谢晓倩", #成员名
-         "member_id": 113443136,  #成员 ID
-         "server_id": "9028788",  #Server ID
-         "push_mode": "group",  #推送模式
-         "target_qq": "829068921",  #推送的群号或 QQ 号
+         "name": "谢晓倩",
+         "member_id": 113443136,
+         "server_id": "9028788",
+         "push_mode": "group",
+         "target_qq": "829068921",
          "rooms": {
-             "11191555": {"name": "小牙牙窝", "target_qq": ""},  #房间名 /  单独推送推送的群号或 QQ 号
+             "11191555": {"name": "小牙牙窝", "target_qq": ""},
              "19416583": {"name": "AY", "target_qq": ""},
-             "11273544": {"name": "直播通知", "target_qq": "", "is_live": True},
          },
      },
 ]
@@ -106,6 +105,9 @@ def find_first_media_url(data, media_type="image"):
         "bigUrl",
         "coverUrl",
         "coverPath",
+        "cover",
+        "roomCover",
+        "liveCover",
         "path",
     }
     audio_keys = {"audioPath", "audioUrl", "voiceUrl", "url", "path"}
@@ -222,11 +224,11 @@ def find_latest_media_detail(member_config, channel_id, media_type="image"):
             if not is_member_message(member_config, detail):
                 continue
             msg_type = str(detail.get("msgType") or "").upper()
-            if media_type == "image" and msg_type not in ("IMAGE", "EXPRESSIMAGE", "EXPRESS"):
+            if media_type == "image" and msg_type not in ("IMAGE", "EXPRESSIMAGE", "EXPRESS", "AGENT_WARMUP_IMG", "GIFT_SKILL_IMG", "CTM_IMG"):
                 continue
-            if media_type == "audio" and msg_type != "AUDIO":
+            if media_type == "audio" and msg_type not in ("AUDIO", "AGENT_WARMUP_AUDIO", "AUDIO_REPLY", "GIFT_SKILL_AUDIO", "FLIPCARD_AUDIO"):
                 continue
-            if media_type == "video" and msg_type not in ("VIDEO", "SHORTVIDEO"):
+            if media_type == "video" and "VIDEO" not in msg_type:
                 continue
 
             media_url = find_first_media_url(detail, media_type=media_type)
@@ -239,6 +241,23 @@ def find_latest_media_detail(member_config, channel_id, media_type="image"):
     if not candidates:
         return None
 
+    return max(candidates, key=lambda row: row[0])[1]
+
+
+def find_latest_detail_by_type(member_config, channel_id, msg_types):
+    candidates = []
+    for fetch_all in (False, True):
+        for index, detail in enumerate(fetch_room_message_details(member_config, channel_id, fetch_all=fetch_all)):
+            if not is_member_message(member_config, detail):
+                continue
+            msg_type = str(detail.get("msgType") or "").upper()
+            if msg_type not in msg_types:
+                continue
+            candidates.append((get_msg_sort_value(detail, index), detail))
+        if candidates:
+            break
+    if not candidates:
+        return None
     return max(candidates, key=lambda row: row[0])[1]
 
 
@@ -326,7 +345,13 @@ def get_live_detail(member_config):
 
         if target_live:
             title = target_live.get("title", "无标题")
-            cover = fix_url(target_live.get("coverPath", ""))
+            cover = (
+                find_first_media_url(target_live, media_type="image")
+                or find_first_media_url(target_live.get("userInfo", {}), media_type="image")
+                or fix_url(target_live.get("coverPath") or "")
+                or fix_url(target_live.get("coverUrl") or "")
+                or fix_url(target_live.get("picPath") or "")
+            )
             live_type = target_live.get("liveType", 1)
             type_str = "电台" if live_type == 2 else "视频"
             return title, cover, type_str
@@ -353,12 +378,15 @@ def parse_msg_content(raw_content, raw_item=None):
             return raw_content
 
         if "[视频消息]" in raw_content:
+            video_url = ""
             if raw_item:
                 video_body = raw_item.get("msgContent") or raw_item.get("bodys") or {}
                 video_parsed = try_parse_json(video_body) if isinstance(video_body, str) else video_body
                 video_url = find_first_media_url(video_parsed, media_type="image")
-                if video_url:
-                    return f"[视频消息] {video_url}"
+            if not video_url and parsed_content is not None:
+                video_url = find_first_media_url(parsed_content, media_type="image")
+            if video_url:
+                return f"[视频消息] {video_url}"
             return "[视频消息] 未找到视频链接"
 
         if parsed_content is not None:
@@ -394,8 +422,49 @@ def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=Fal
 
     print(f"正在推送到 {target_qq}...", end="")
 
-    # 1. 礼物感谢回复（文字/语音）
-    if raw_item and (raw_item.get("messageType") in ("GIFTREPLY", "AUDIO_GIFT_REPLY")
+    # 1. 翻牌消息
+    if raw_item and (raw_item.get("messageType") == "FLIPCARD" or raw_item.get("msgType") == "FLIPCARD"):
+        parsed = try_parse_json(content)
+        if parsed and isinstance(parsed, dict):
+            question = parsed.get("question") or parsed.get("questionText") or ""
+            answer = parsed.get("answer") or parsed.get("answerText") or ""
+            msg_body = (
+                f"【{room_name}|{member_name}】\n"
+                f"『公开翻牌问题』：{question}\n"
+                f"『{sender_nick}|{member_name}』：{answer}\n"
+                f" {get_current_datetime()}"
+            )
+        else:
+            msg_body = (
+                f"【{room_name}|{member_name}】\n"
+                f"『{sender_nick}|{member_name}』：{content}\n"
+                f" {get_current_datetime()}"
+            )
+    # 2. 回复消息
+    elif raw_item and (raw_item.get("messageType") in ("REPLY", "AGENT_QCHAT_TEXT_REPLY")
+                       or raw_item.get("msgType") in ("REPLY", "AGENT_QCHAT_TEXT_REPLY")):
+        parsed = try_parse_json(content)
+        if parsed and isinstance(parsed, dict):
+            reply_info = parsed.get("replyInfo") or {}
+            if not isinstance(reply_info, dict):
+                reply_info = {}
+            reply_name = reply_info.get("replyName") or parsed.get("replyName") or ""
+            reply_text = reply_info.get("replyText") or parsed.get("replyText") or ""
+            text = parsed.get("text") or parsed.get("body") or ""
+            msg_body = (
+                f"【{room_name}|{member_name}】\n"
+                f"『{reply_name}』：{reply_text}\n"
+                f"『{sender_nick}|{member_name}』：{text}\n"
+                f" {get_current_datetime()}"
+            )
+        else:
+            msg_body = (
+                f"【{room_name}|{member_name}】\n"
+                f"『{sender_nick}|{member_name}』：{content}\n"
+                f" {get_current_datetime()}"
+            )
+    # 3. 礼物感谢回复（文字/语音）
+    elif raw_item and (raw_item.get("messageType") in ("GIFTREPLY", "AUDIO_GIFT_REPLY", "AGENT_QCHAT_GIFT_REPLY")
                      or raw_item.get("msgType") in ("GIFTREPLY", "AUDIO_GIFT_REPLY")):
         parsed = try_parse_json(content)
         if parsed and isinstance(parsed, dict) and "giftReplyInfo" in parsed:
@@ -418,18 +487,27 @@ def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=Fal
                 f"『{sender_nick}|{member_name}』：{content}\n"
                 f" {get_current_datetime()}"
             )
-    # 2. 直播通知
+    # 4. 直播通知
     elif is_live or "[直播消息]" in content:
-        live_title, live_cover, live_type = get_live_detail(member_config)
-        cover_code = f"@image={live_cover}@" if live_cover else ""
+        parsed = try_parse_json(content)
+        live_title = ""
+        live_cover = ""
+        if parsed and isinstance(parsed, dict):
+            live_title = parsed.get("liveTitle", "")
+            live_cover = parsed.get("liveCover", "")
+        api_title, api_cover, live_type = get_live_detail(member_config)
+        live_title = live_title or api_title
+        live_cover = fix_url(live_cover) or api_cover
+        cover_code = f"@image={encode_qmsg_image_url(live_cover)}@" if live_cover else ""
         msg_body = (
             f"【{room_name}|{member_name}】\n"
+            f"{member_name}直播啦~\n"
             f"标题：{live_title}\n"
             f"类型：{live_type}\n"
             f"{cover_code}\n"
             f" {get_current_datetime()}"
         )
-    # 3. 普通消息
+    # 5. 普通消息
     else:
         final_content = parse_msg_content(content, raw_item=raw_item)
         msg_body = (
@@ -467,9 +545,24 @@ def get_message_payload(member_config, rooms, item):
     star_name = get_message_sender_name(item)
     is_live_msg = False
 
-    if "[直播消息]" in content or room_config.get("is_live"):
+    if "[表情消息]" in content:
+        content = "[图片消息]"
+
+    if "[直播消息]" in content or room_config.get("is_live") or item.get("msgType") in ("LIVEPUSH", "LIVE_PUSH", "SHARE_LIVE"):
         is_live_msg = True
-        content = "[直播消息]"
+        body_str = item.get("bodys") or ""
+        parsed = try_parse_json(body_str)
+        if parsed and isinstance(parsed, dict):
+            info = parsed.get("livePushInfo") or {}
+            if isinstance(info, dict):
+                content = json.dumps({
+                    "liveTitle": info.get("liveTitle", ""),
+                    "liveCover": info.get("liveCover", ""),
+                }, ensure_ascii=False)
+            else:
+                content = "[直播消息]"
+        else:
+            content = "[直播消息]"
     elif "[图片消息]" in content:
         detail = find_latest_media_detail(member_config, channel_id, media_type="image")
         if detail:
@@ -485,6 +578,13 @@ def get_message_payload(member_config, rooms, item):
         if detail:
             raw_item = detail
             star_name = get_message_sender_name(detail) or star_name
+    elif "[礼物回复消息]" in content:
+        detail = find_latest_detail_by_type(member_config, channel_id, ("GIFTREPLY", "AUDIO_GIFT_REPLY"))
+        if detail:
+            raw_item = detail
+            star_name = get_message_sender_name(detail) or star_name
+            raw_content = detail.get("msgContent") or ""
+            content = json.dumps(raw_content, ensure_ascii=False) if isinstance(raw_content, dict) else str(raw_content)
 
     msg_key = get_message_cache_key(member_config, channel_id, content, raw_item)
     return room_config, star_name, content, is_live_msg, msg_key, raw_item
@@ -496,14 +596,31 @@ def get_detail_message_content(detail):
     if body is None:
         body = detail.get("bodys", "")
 
-    if msg_type in ("IMAGE", "EXPRESSIMAGE", "EXPRESS"):
+    if msg_type in ("IMAGE", "EXPRESSIMAGE", "EXPRESS", "AGENT_WARMUP_IMG", "GIFT_SKILL_IMG", "CTM_IMG"):
         return "[图片消息]"
-    if msg_type in ("VIDEO", "SHORTVIDEO"):
+    if msg_type in ("GIFTREPLY", "AUDIO_GIFT_REPLY", "AGENT_QCHAT_GIFT_REPLY"):
+        if isinstance(body, (dict, list)):
+            return json.dumps(body, ensure_ascii=False)
+        return str(body or "[礼物回复消息]")
+    if msg_type in ("VIDEO", "SHORTVIDEO", "AGENT_WARMUP_VIDEO", "SHARE_VIDEO", "GIFT_SKILL_VIDEO", "FLIPCARD_VIDEO"):
         return "[视频消息]"
-    if msg_type == "AUDIO":
+    if msg_type in ("AUDIO", "AGENT_WARMUP_AUDIO", "AUDIO_REPLY", "GIFT_SKILL_AUDIO", "FLIPCARD_AUDIO"):
         return "[语音消息]"
     if msg_type in ("LIVEPUSH", "LIVE_PUSH", "SHARE_LIVE"):
+        body_str = detail.get("bodys") or detail.get("msgContent") or ""
+        parsed = try_parse_json(body_str)
+        if parsed and isinstance(parsed, dict):
+            info = parsed.get("livePushInfo") or {}
+            if isinstance(info, dict):
+                return json.dumps({
+                    "liveTitle": info.get("liveTitle", ""),
+                    "liveCover": info.get("liveCover", ""),
+                }, ensure_ascii=False)
         return "[直播消息]"
+    if msg_type in ("GIFT_TEXT", "GIFT_SKILL_TEXT"):
+        if isinstance(body, (dict, list)):
+            return json.dumps(body, ensure_ascii=False)
+        return str(body or "")
     if isinstance(body, (dict, list)):
         return json.dumps(body, ensure_ascii=False)
     return str(body or "")
@@ -511,8 +628,13 @@ def get_detail_message_content(detail):
 
 def get_detail_message_payload(member_config, room_config, channel_id, detail):
     content = get_detail_message_content(detail)
-    is_live_msg = "[直播消息]" in content or room_config.get("is_live")
-    if is_live_msg:
+    msg_type = str(detail.get("msgType") or "").upper()
+    is_live_msg = (
+        "[直播消息]" in content
+        or room_config.get("is_live")
+        or msg_type in ("LIVEPUSH", "LIVE_PUSH", "SHARE_LIVE")
+    )
+    if is_live_msg and "[直播消息]" in content:
         content = "[直播消息]"
 
     star_name = get_message_sender_name(detail) or member_config["name"]
@@ -573,7 +695,7 @@ def monitor_member(member_config, is_silent_init=False):
 
             if not is_silent_init:
                 print("\n" + "-" * 30)
-                print(f"🔔 [{get_current_datetime()}] {member_config['name']} 新动态: {content}")
+                print(f"[{get_current_datetime()}] {member_config['name']} 新动态: {content}")
                 send_qmsg_rich(member_config, room_config, star_name, content, is_live=is_live_msg, raw_item=raw_item)
                 print("-" * 30 + "\n")
 
@@ -670,7 +792,7 @@ def main():
     print("=" * 50)
     print("多成员全自动监控系统")
     print(f"监控成员数: {len(MEMBERS)}")
-    print(f"⏱刷新频率: {CHECK_INTERVAL}秒/次")
+    print(f"刷新频率: {CHECK_INTERVAL}秒/次")
     print("=" * 50)
 
     print("正在初始化缓存(跳过旧消息)...", end="")
