@@ -23,13 +23,13 @@ DEFAULT_TARGET_QQ = ""  # 默认群号或 QQ 号
 # 2. 如果房间不写 push_mode/target_qq，会使用成员级配置；成员也没写则使用默认配置
 MEMBERS = [
          {
-         "name": "谢晓倩",
-         "member_id": 113443136,
-         "server_id": "9028788",
-         "push_mode": "group",
-         "target_qq": "829068921",
+         "name": "谢晓倩", #成员名
+         "member_id": 113443136,  #成员 ID
+         "server_id": "9028788",  #Server ID
+         "push_mode": "group",  #推送模式
+         "target_qq": "829068921",  #推送的群号或 QQ 号
          "rooms": {
-             "11191555": {"name": "小牙牙窝", "target_qq": ""},
+             "11191555": {"name": "小牙牙窝", "target_qq": ""},  #房间名 /  单独推送推送的群号或 QQ 号
              "19416583": {"name": "AY", "target_qq": ""},
              "11273544": {"name": "直播通知", "target_qq": "", "is_live": True},
          },
