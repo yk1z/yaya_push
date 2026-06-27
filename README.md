@@ -54,7 +54,7 @@ sudo docker run --restart=always -d --name qmsgnt \
   qmsgnt
 ```
 
-### 5. 获取 Token 与 WebUI 登录
+### 5. 获取 Token
 
 运行容器后，执行以下命令查看日志，获取用于登录 WebUI 的 Token：
 
@@ -62,19 +62,23 @@ sudo docker run --restart=always -d --name qmsgnt \
 sudo docker logs qmsgnt | grep -i token
 ```
 
-### 6. 打开浏览器访问
+### 6. 访问 WebUI 进行配置
 
 ```text
 http://你的服务器公网IP:6099/webui
 ```
-
 输入刚才获取到的 Token，即可进入 WebUI 并登录。
 
-### 7. 后台运行推送脚本
+登录QQ后，在插件管理中启用 QmsgNtClient ，并在插件配置中输入Qmsg Key
 
-确保你的 `push.py` 脚本在当前目录下，然后使用 `nohup` 挂起：
+### 7. 配置并上传 push.py
+
+配置完 push.py 后，将文件上传到 /home/admin/yaya_push
+
+### 8. 后台运行 push.py
 
 ```bash
+cd /home/admin/yaya_push
 nohup python3 push.py > push.log 2>&1 &
 tail -f push.log
 ```
