@@ -15,19 +15,19 @@ CHECK_INTERVAL = 1
 
 # 默认推送配置。room 或 member 没单独配置时，会使用这里。
 # group = 推送到群，private = 推送到私聊
-DEFAULT_PUSH_MODE = "group"
-DEFAULT_TARGET_QQ = ""  # 默认群号或 QQ 号
+DEFAULT_PUSH_MODE = "private"
+DEFAULT_TARGET_QQ = "2696222344"  # 默认群号或 QQ 号
 
 # 多成员配置：
-# 1. 每个房间可以单独设置 target_qq，推送到不同群
+# 1. 每个房间可以单独设置 target_qq
 # 2. 如果房间不写 push_mode/target_qq，会使用成员级配置；成员也没写则使用默认配置
 MEMBERS = [
          {
          "name": "谢晓倩",
          "member_id": 113443136,
          "server_id": "9028788",
-         "push_mode": "group",
-         "target_qq": "829068921",
+         "push_mode": "private",
+         "target_qq": "2696222344",
          "rooms": {
              "11191555": {"name": "小牙牙窝", "target_qq": ""},
              "19416583": {"name": "AY", "target_qq": ""},
@@ -149,8 +149,7 @@ def find_first_media_url(data, media_type="image"):
 
 
 def encode_qmsg_image_url(url):
-    # Qmsg's image parser is sensitive to special characters in URLs.
-    # Keep URL separators readable, encode base64/path/query value characters like "=".
+
     return quote(str(url), safe=":/?&")
 
 
@@ -228,7 +227,7 @@ def find_latest_media_detail(member_config, channel_id, media_type="image"):
                 continue
             if media_type == "audio" and msg_type not in ("AUDIO", "AGENT_WARMUP_AUDIO", "AUDIO_REPLY", "GIFT_SKILL_AUDIO", "FLIPCARD_AUDIO"):
                 continue
-            if media_type == "video" and "VIDEO" not in msg_type:
+            if media_type == "video" and msg_type not in ("VIDEO", "SHORTVIDEO", "AGENT_WARMUP_VIDEO", "SHARE_VIDEO", "GIFT_SKILL_VIDEO", "FLIPCARD_VIDEO"):
                 continue
 
             media_url = find_first_media_url(detail, media_type=media_type)
@@ -301,7 +300,6 @@ def is_member_message(member_config, item):
             return True
         if channel_role and channel_role != "0":
             return True
-        return False
 
     sender_id = str(item.get("senderUserId") or item.get("senderId") or item.get("uid") or "")
     if member_id and sender_id == member_id:
@@ -315,9 +313,9 @@ def is_member_message(member_config, item):
 
 
 def get_message_cache_key(member_config, channel_id, content, item):
-    for key in ("msgId", "messageId", "id", "msgTime", "sendTime", "createTime", "time", "msgTimeStr"):
+    for key in ("msgIdServer", "msgIdClient", "msgId", "messageId", "id", "msgTime", "sendTime", "createTime", "time", "msgTimeStr"):
         value = item.get(key)
-        if value:
+        if value is not None and value != "":
             return f"{member_config['server_id']}_{channel_id}_{key}_{value}"
 
     media_url = find_first_media_url(item, media_type="image") or find_first_media_url(item, media_type="audio")
@@ -465,7 +463,7 @@ def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=Fal
             )
     # 3. 礼物感谢回复（文字/语音）
     elif raw_item and (raw_item.get("messageType") in ("GIFTREPLY", "AUDIO_GIFT_REPLY", "AGENT_QCHAT_GIFT_REPLY")
-                     or raw_item.get("msgType") in ("GIFTREPLY", "AUDIO_GIFT_REPLY")):
+                     or raw_item.get("msgType") in ("GIFTREPLY", "AUDIO_GIFT_REPLY", "AGENT_QCHAT_GIFT_REPLY")):
         parsed = try_parse_json(content)
         if parsed and isinstance(parsed, dict) and "giftReplyInfo" in parsed:
             info = parsed["giftReplyInfo"]
@@ -540,7 +538,9 @@ def get_message_payload(member_config, rooms, item):
         return None
 
     room_config = rooms[channel_id]
-    content = item.get("msgContent", "")
+    content = item.get("msgContent") or ""
+    if isinstance(content, (dict, list)):
+        content = json.dumps(content, ensure_ascii=False)
     raw_item = item
     star_name = get_message_sender_name(item)
     is_live_msg = False
@@ -548,10 +548,13 @@ def get_message_payload(member_config, rooms, item):
     if "[表情消息]" in content:
         content = "[图片消息]"
 
-    if "[直播消息]" in content or room_config.get("is_live") or item.get("msgType") in ("LIVEPUSH", "LIVE_PUSH", "SHARE_LIVE"):
+    if "[直播消息]" in content or room_config.get("is_live") or item.get("msgType") in ("LIVEPUSH", "LIVE_PUSH", "SHARE_LIVE") or item.get("messageType") in ("LIVEPUSH", "LIVE_PUSH", "SHARE_LIVE"):
         is_live_msg = True
-        body_str = item.get("bodys") or ""
-        parsed = try_parse_json(body_str)
+        body_data = item.get("bodys") or ""
+        if isinstance(body_data, dict):
+            parsed = body_data
+        else:
+            parsed = try_parse_json(body_data)
         if parsed and isinstance(parsed, dict):
             info = parsed.get("livePushInfo") or {}
             if isinstance(info, dict):
@@ -579,12 +582,12 @@ def get_message_payload(member_config, rooms, item):
             raw_item = detail
             star_name = get_message_sender_name(detail) or star_name
     elif "[礼物回复消息]" in content:
-        detail = find_latest_detail_by_type(member_config, channel_id, ("GIFTREPLY", "AUDIO_GIFT_REPLY"))
+        detail = find_latest_detail_by_type(member_config, channel_id, ("GIFTREPLY", "AUDIO_GIFT_REPLY", "AGENT_QCHAT_GIFT_REPLY"))
         if detail:
             raw_item = detail
             star_name = get_message_sender_name(detail) or star_name
             raw_content = detail.get("msgContent") or ""
-            content = json.dumps(raw_content, ensure_ascii=False) if isinstance(raw_content, dict) else str(raw_content)
+            content = json.dumps(raw_content, ensure_ascii=False) if isinstance(raw_content, (dict, list)) else str(raw_content)
 
     msg_key = get_message_cache_key(member_config, channel_id, content, raw_item)
     return room_config, star_name, content, is_live_msg, msg_key, raw_item
@@ -608,7 +611,10 @@ def get_detail_message_content(detail):
         return "[语音消息]"
     if msg_type in ("LIVEPUSH", "LIVE_PUSH", "SHARE_LIVE"):
         body_str = detail.get("bodys") or detail.get("msgContent") or ""
-        parsed = try_parse_json(body_str)
+        if isinstance(body_str, dict):
+            parsed = body_str
+        else:
+            parsed = try_parse_json(body_str)
         if parsed and isinstance(parsed, dict):
             info = parsed.get("livePushInfo") or {}
             if isinstance(info, dict):
@@ -662,7 +668,6 @@ def collect_test_candidates(member_config, limit):
                 continue
             candidates_by_key[msg_key] = (get_msg_sort_value(detail, index), payload)
 
-    # Some special channels, especially live notification channels, may only appear in last-message summaries.
     for index, item in enumerate(fetch_member_messages(member_config)):
         payload = get_message_payload(member_config, rooms, item)
         if not payload:
@@ -802,7 +807,7 @@ def main():
     print("-" * 50)
 
     while True:
-        print(f"\r[{get_current_datetime().split(' ')[1]}] 正在监控中... (Ctrl+C 停止)", end="", flush=True)
+        print(f"\r[{get_current_datetime().split(' ')[1]}] 正在监控中 (Ctrl+C 停止)", end="", flush=True)
         monitor_once(is_silent_init=False)
         time.sleep(CHECK_INTERVAL)
 
