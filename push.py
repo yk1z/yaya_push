@@ -15,11 +15,11 @@ CHECK_INTERVAL = 1
 
 # 默认推送配置。room 或 member 没单独配置时，会使用这里。
 # group = 推送到群，private = 推送到私聊
-DEFAULT_PUSH_MODE = "private"
-DEFAULT_TARGET_QQ = "2696222344"  # 默认群号或 QQ 号
+DEFAULT_PUSH_MODE = "group"
+DEFAULT_TARGET_QQ = ""  # 默认群号或 QQ 号
 
 # 多成员配置：
-# 1. 每个房间可以单独设置 target_qq
+# 1. 每个房间可以单独设置 target_qq，推送到不同群
 # 2. 如果房间不写 push_mode/target_qq，会使用成员级配置；成员也没写则使用默认配置
 MEMBERS = [
          {
@@ -149,7 +149,8 @@ def find_first_media_url(data, media_type="image"):
 
 
 def encode_qmsg_image_url(url):
-
+    # Qmsg's image parser is sensitive to special characters in URLs.
+    # Keep URL separators readable, encode base64/path/query value characters like "=".
     return quote(str(url), safe=":/?&")
 
 
@@ -668,6 +669,7 @@ def collect_test_candidates(member_config, limit):
                 continue
             candidates_by_key[msg_key] = (get_msg_sort_value(detail, index), payload)
 
+    # Some special channels, especially live notification channels, may only appear in last-message summaries.
     for index, item in enumerate(fetch_member_messages(member_config)):
         payload = get_message_payload(member_config, rooms, item)
         if not payload:
@@ -679,30 +681,38 @@ def collect_test_candidates(member_config, limit):
 
 
 def monitor_member(member_config, is_silent_init=False):
-    """
-    执行单个成员的一次检查。
-    is_silent_init 为 True 时，只记录缓存不推送，用于启动时跳过旧消息。
-    """
+
     try:
         rooms = get_member_rooms(member_config)
-        msg_list = fetch_member_messages(member_config)
+        
+        # 循环遍历配置里的每一个房间通道
+        for channel_id, room_config in rooms.items():
+            # 直接获取该房间最新的几条消息（fetch_all=False 只拿最新，效率高）
+            msg_list = fetch_room_message_details(member_config, channel_id, limit=10, fetch_all=False)
+            
+            # 倒序处理，确保新消息按时间顺序一条条推送
+            for detail in reversed(msg_list):
+                if not is_member_message(member_config, detail):
+                    continue
+                    
+                # 转换为标准推送 Payload
+                payload = get_detail_message_payload(member_config, room_config, channel_id, detail)
+                _, star_name, content, is_live_msg, msg_key, raw_item = payload
+                
+                if not content.strip():
+                    continue
+                    
+                # 检查缓存，防止重复推送
+                if msg_key in last_msg_cache:
+                    continue
 
-        for item in msg_list:
-            payload = get_message_payload(member_config, rooms, item)
-            if not payload:
-                continue
+                last_msg_cache[msg_key] = True
 
-            room_config, star_name, content, is_live_msg, msg_key, raw_item = payload
-            if msg_key in last_msg_cache:
-                continue
-
-            last_msg_cache[msg_key] = True
-
-            if not is_silent_init:
-                print("\n" + "-" * 30)
-                print(f"[{get_current_datetime()}] {member_config['name']} 新动态: {content}")
-                send_qmsg_rich(member_config, room_config, star_name, content, is_live=is_live_msg, raw_item=raw_item)
-                print("-" * 30 + "\n")
+                if not is_silent_init:
+                    print("\n" + "-" * 30)
+                    print(f"[{get_current_datetime()}] {member_config['name']} 新动态: {content}")
+                    send_qmsg_rich(member_config, room_config, star_name, content, is_live=is_live_msg, raw_item=raw_item)
+                    print("-" * 30 + "\n")
 
     except requests.exceptions.ConnectionError:
         print(f"{member_config['name']} 网络连接失败，等待重试...")
