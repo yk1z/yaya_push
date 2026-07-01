@@ -1,3 +1,4 @@
+import os
 import requests
 import json
 import datetime
@@ -10,19 +11,19 @@ from urllib.parse import quote
 QMSG_KEY = ""  # 填 Qmsg 的 KEY
 USER_TOKEN = ""  # 填口袋账号 token
 
-# 监控间隔 (秒)
-CHECK_INTERVAL = 1
+CHECK_INTERVAL = 1  # 监控间隔 (秒)
 
-# 默认推送配置。room 或 member 没单独配置时，会使用这里。
-# group = 推送到群，private = 推送到私聊
-DEFAULT_PUSH_MODE = "group"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_FILE = os.path.join(BASE_DIR, "msg_cache.json")
+
+# 默认推送配置。room 或 member 没单独配置时，会使用这里。group = 推送到群，private = 推送到私聊
+DEFAULT_PUSH_MODE = "group"  # 默认推送模式
 DEFAULT_TARGET_QQ = ""  # 默认群号或 QQ 号
 
 # 多成员配置：
-# 1. 每个房间可以单独设置 target_qq，推送到不同群
-# 2. 如果房间不写 push_mode/target_qq，会使用成员级配置；成员也没写则使用默认配置
+# 每个房间可以单独设置 push_mode/target_qq ，如果不写 push_mode/target_qq ，会使用成员级配置，成员也没写则使用默认配置
 MEMBERS = [
-         {
+     {
          "name": "谢晓倩",
          "member_id": 113443136,
          "server_id": "9028788",
@@ -43,6 +44,30 @@ ROOM_MSG_ALL_API_URL = "https://pocketapi.48.cn/im/api/v1/team/message/list/all"
 LIVE_API_URL = "https://pocketapi.48.cn/live/api/v1/live/getLiveList"
 
 last_msg_cache = {}
+
+def load_cache():
+    """从本地文件持久化加载缓存"""
+    global last_msg_cache
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                last_msg_cache = json.load(f)
+            if len(last_msg_cache) > 2000:
+                keys = list(last_msg_cache.keys())
+                last_msg_cache = {k: last_msg_cache[k] for k in keys[-1000:]}
+        except Exception as e:
+            print(f"\n加载缓存文件失败，将使用空缓存: {e}")
+            last_msg_cache = {}
+    else:
+        last_msg_cache = {}
+
+def save_cache():
+    """保存缓存到本地文件"""
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(last_msg_cache, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"\n保存缓存文件失败: {e}")
 
 
 def get_headers():
@@ -95,23 +120,19 @@ def find_first_media_url(data, media_type="image"):
         return ""
 
     image_keys = {
-        "url",
-        "imageUrl",
-        "imgUrl",
-        "picUrl",
-        "pictureUrl",
-        "originalUrl",
-        "originUrl",
-        "bigUrl",
-        "coverUrl",
-        "coverPath",
-        "cover",
-        "roomCover",
-        "liveCover",
-        "path",
+        "url", "imageUrl", "imgUrl", "picUrl", "pictureUrl", "originalUrl",
+        "originUrl", "bigUrl", "coverUrl", "coverPath", "cover", "roomCover",
+        "liveCover", "path",
     }
     audio_keys = {"audioPath", "audioUrl", "voiceUrl", "url", "path"}
-    target_keys = image_keys if media_type == "image" else audio_keys
+    video_keys = {"videoUrl", "videoPath", "playUrl", "url", "path"} 
+
+    if media_type == "image":
+        target_keys = image_keys
+    elif media_type == "audio":
+        target_keys = audio_keys
+    else:
+        target_keys = video_keys
     skip_key_words = ("avatar", "head", "icon", "badge", "logo")
 
     if isinstance(data, str):
@@ -149,8 +170,6 @@ def find_first_media_url(data, media_type="image"):
 
 
 def encode_qmsg_image_url(url):
-    # Qmsg's image parser is sensitive to special characters in URLs.
-    # Keep URL separators readable, encode base64/path/query value characters like "=".
     return quote(str(url), safe=":/?&")
 
 
@@ -174,47 +193,47 @@ def get_member_rooms(member_config):
 
 
 def fetch_member_messages(member_config):
-    resp = requests.post(
-        MSG_API_URL,
-        headers=get_headers(),
-        json={"serverId": member_config["server_id"]},
-        timeout=5,
-    )
-
-    if resp.status_code != 200:
-        raise RuntimeError(f"服务器响应异常: {resp.status_code}")
-
-    data = resp.json()
-    if data.get("status") != 200:
-        raise RuntimeError(f"API返回错误: {data.get('message')}")
-
-    return data.get("content", {}).get("lastMsgList", [])
+    try:
+        resp = requests.post(
+            MSG_API_URL,
+            headers=get_headers(),
+            json={"serverId": member_config["server_id"]},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"服务器响应异常: {resp.status_code}")
+        data = resp.json()
+        if data.get("status") != 200:
+            raise RuntimeError(f"API返回错误: {data.get('message')}")
+        return data.get("content", {}).get("lastMsgList", [])
+    except Exception as e:
+        raise RuntimeError(f"请求失败: {e}")
 
 
 def fetch_room_message_details(member_config, channel_id, limit=50, fetch_all=False):
     url = ROOM_MSG_ALL_API_URL if fetch_all else ROOM_MSG_API_URL
-    resp = requests.post(
-        url,
-        headers=get_headers(),
-        json={
-            "channelId": int(channel_id),
-            "serverId": int(member_config["server_id"]),
-            "nextTime": 0,
-            "limit": int(limit),
-        },
-        timeout=8,
-    )
-
-    if resp.status_code != 200:
+    try:
+        resp = requests.post(
+            url,
+            headers=get_headers(),
+            json={
+                "channelId": int(channel_id),
+                "serverId": int(member_config["server_id"]),
+                "nextTime": 0,
+                "limit": int(limit),
+            },
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if data.get("status") != 200:
+            return []
+        content = data.get("content") or {}
+        msg_list = content.get("message") or content.get("messageList") or []
+        return msg_list if isinstance(msg_list, list) else []
+    except Exception:
         return []
-
-    data = resp.json()
-    if data.get("status") != 200:
-        return []
-
-    content = data.get("content") or {}
-    msg_list = content.get("message") or content.get("messageList") or []
-    return msg_list if isinstance(msg_list, list) else []
 
 
 def find_latest_media_detail(member_config, channel_id, media_type="image"):
@@ -234,13 +253,11 @@ def find_latest_media_detail(member_config, channel_id, media_type="image"):
             media_url = find_first_media_url(detail, media_type=media_type)
             if media_url:
                 candidates.append((get_msg_sort_value(detail, index), detail))
-
         if candidates:
             break
 
     if not candidates:
         return None
-
     return max(candidates, key=lambda row: row[0])[1]
 
 
@@ -462,7 +479,7 @@ def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=Fal
                 f"『{sender_nick}|{member_name}』：{content}\n"
                 f" {get_current_datetime()}"
             )
-    # 3. 礼物感谢回复（文字/语音）
+    # 3. 礼物感谢回复
     elif raw_item and (raw_item.get("messageType") in ("GIFTREPLY", "AUDIO_GIFT_REPLY", "AGENT_QCHAT_GIFT_REPLY")
                      or raw_item.get("msgType") in ("GIFTREPLY", "AUDIO_GIFT_REPLY", "AGENT_QCHAT_GIFT_REPLY")):
         parsed = try_parse_json(content)
@@ -655,10 +672,9 @@ def collect_test_candidates(member_config, limit):
 
     for channel_id, room_config in rooms.items():
         room_details = []
-        for fetch_all in (False, True):
-            room_details.extend(
-                fetch_room_message_details(member_config, channel_id, limit=max(limit, 20), fetch_all=fetch_all)
-            )
+        room_details.extend(
+            fetch_room_message_details(member_config, channel_id, limit=max(limit, 20), fetch_all=False)
+        )
 
         for index, detail in enumerate(room_details):
             if not is_member_message(member_config, detail):
@@ -669,57 +685,60 @@ def collect_test_candidates(member_config, limit):
                 continue
             candidates_by_key[msg_key] = (get_msg_sort_value(detail, index), payload)
 
-    # Some special channels, especially live notification channels, may only appear in last-message summaries.
-    for index, item in enumerate(fetch_member_messages(member_config)):
-        payload = get_message_payload(member_config, rooms, item)
-        if not payload:
-            continue
-        _, _, _, _, msg_key, _ = payload
-        candidates_by_key.setdefault(msg_key, (get_msg_sort_value(item, index), payload))
+    try:
+        for index, item in enumerate(fetch_member_messages(member_config)):
+            payload = get_message_payload(member_config, rooms, item)
+            if not payload:
+                continue
+            _, _, _, _, msg_key, _ = payload
+            candidates_by_key.setdefault(msg_key, (get_msg_sort_value(item, index), payload))
+    except Exception:
+        pass
 
     return list(candidates_by_key.values())
 
 
 def monitor_member(member_config, is_silent_init=False):
-
+    global last_msg_cache
     try:
         rooms = get_member_rooms(member_config)
+        need_save = False
         
-        # 循环遍历配置里的每一个房间通道
         for channel_id, room_config in rooms.items():
-            # 直接获取该房间最新的几条消息（fetch_all=False 只拿最新，效率高）
             msg_list = fetch_room_message_details(member_config, channel_id, limit=10, fetch_all=False)
             
-            # 倒序处理，确保新消息按时间顺序一条条推送
             for detail in reversed(msg_list):
                 if not is_member_message(member_config, detail):
                     continue
                     
-                # 转换为标准推送 Payload
                 payload = get_detail_message_payload(member_config, room_config, channel_id, detail)
                 _, star_name, content, is_live_msg, msg_key, raw_item = payload
                 
                 if not content.strip():
                     continue
                     
-                # 检查缓存，防止重复推送
                 if msg_key in last_msg_cache:
                     continue
 
                 last_msg_cache[msg_key] = True
+                need_save = True
 
                 if not is_silent_init:
                     print("\n" + "-" * 30)
                     print(f"[{get_current_datetime()}] {member_config['name']} 新动态: {content}")
                     send_qmsg_rich(member_config, room_config, star_name, content, is_live=is_live_msg, raw_item=raw_item)
                     print("-" * 30 + "\n")
+        
+        if need_save:
+            if len(last_msg_cache) > 2000:
+                keys = list(last_msg_cache.keys())
+                last_msg_cache = {k: last_msg_cache[k] for k in keys[-1000:]}
+            save_cache()
 
-    except requests.exceptions.ConnectionError:
-        print(f"{member_config['name']} 网络连接失败，等待重试...")
     except RuntimeError as e:
-        print(f"{member_config['name']} {e}")
+        print(f"\n[{get_current_datetime()}] {member_config['name']} 业务提示: {e}")
     except Exception as e:
-        print(f"{member_config['name']} 发生未知异常: {e}")
+        print(f"\n[{get_current_datetime()}] {member_config['name']} 发生网络或未知异常: {e}")
 
 
 def monitor_once(is_silent_init=False):
@@ -753,10 +772,6 @@ def test_push_latest_once(limit=10):
                 print("-" * 30 + "\n")
                 time.sleep(0.8)
 
-        except requests.exceptions.ConnectionError:
-            print(f"{member_config['name']} 网络连接失败")
-        except RuntimeError as e:
-            print(f"{member_config['name']} {e}")
         except Exception as e:
             print(f"{member_config['name']} 测试推送失败: {e}")
 
@@ -790,8 +805,8 @@ def debug_latest_messages():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="口袋48多成员消息监控与 Qmsg 推送")
-    parser.add_argument("--test", action="store_true", help="抓取每个成员目标房间的最新消息并强制推送")
+    parser = argparse.ArgumentParser(description="口袋48成员房间消息推送")
+    parser.add_argument("--test", action="store_true", help="抓取每个成员目标房间的最新消息并推送")
     parser.add_argument("--test-limit", type=int, default=10, help="测试推送条数，默认 10")
     parser.add_argument("--debug-latest", action="store_true", help="打印已配置房间的最新消息原始数据，用于排查图片字段")
     args = parser.parse_args()
@@ -805,15 +820,22 @@ def main():
         return
 
     print("=" * 50)
-    print("多成员全自动监控系统")
-    print(f"监控成员数: {len(MEMBERS)}")
+    print("牙牙推送 By yk1z")
+    print(f"已添加成员数: {len(MEMBERS)}")
+    print(f"已添加成员: {' '.join([m['name'] for m in MEMBERS])}")
     print(f"刷新频率: {CHECK_INTERVAL}秒/次")
     print("=" * 50)
 
-    print("正在初始化缓存(跳过旧消息)...", end="")
-    monitor_once(is_silent_init=True)
-    print(" 完成")
-    print(f"当前已缓存 {len(last_msg_cache)} 条历史记录，开始实时监控...")
+    load_cache()
+
+    if not last_msg_cache:
+        print("正在初始化新缓存(跳过历史消息)...", end="")
+        monitor_once(is_silent_init=True)
+        save_cache()
+        print(" 完成")
+    else:
+        print(f"成功恢复本地缓存 {len(last_msg_cache)} 条")
+
     print("-" * 50)
 
     while True:
@@ -826,4 +848,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n监控已停止")
+        print("\n\n已手动停止")
