@@ -456,7 +456,7 @@ def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=Fal
                 f"『{sender_nick}|{member_name}』：{content}\n"
                 f" {get_current_datetime()}"
             )
-    # 2. 回复消息
+   # 2. 回复消息
     elif raw_item and (raw_item.get("messageType") in ("REPLY", "AGENT_QCHAT_TEXT_REPLY")
                        or raw_item.get("msgType") in ("REPLY", "AGENT_QCHAT_TEXT_REPLY")):
         parsed = try_parse_json(content)
@@ -466,7 +466,34 @@ def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=Fal
                 reply_info = {}
             reply_name = reply_info.get("replyName") or parsed.get("replyName") or ""
             reply_text = reply_info.get("replyText") or parsed.get("replyText") or ""
-            text = parsed.get("text") or parsed.get("body") or ""
+            
+            text = (
+                reply_info.get("text") or 
+                parsed.get("text") or 
+                parsed.get("body") or 
+                parsed.get("content") or 
+                parsed.get("msg") or 
+                ""
+            )
+            
+            if not text and raw_item:
+                bodys = raw_item.get("bodys") or ""
+                if isinstance(bodys, str) and bodys and not bodys.startswith("{"):
+                    text = bodys
+                ext = try_parse_json(raw_item.get("extInfo"))
+                if ext and isinstance(ext, dict) and not text:
+                    text = ext.get("text") or ext.get("content") or ""
+
+            if not text:
+                img_url = find_first_media_url(parsed, "image") or find_first_media_url(raw_item, "image")
+                audio_url = find_first_media_url(parsed, "audio") or find_first_media_url(raw_item, "audio")
+                if img_url:
+                    text = f"@image={encode_qmsg_image_url(img_url)}@"
+                elif audio_url:
+                    text = f"[语音消息] {audio_url}"
+                else:
+                    text = f"[未识别字段] {content}"
+
             msg_body = (
                 f"【{room_name}|{member_name}】\n"
                 f"『{reply_name}』：{reply_text}\n"
