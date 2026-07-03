@@ -12,16 +12,32 @@
 ```bash
 sudo yum install -y docker wget unzip || (sudo apt update && sudo apt install -y docker.io wget unzip)
 sudo systemctl enable --now docker
+```
+
+如果国内服务器拉取镜像超时，可配置镜像加速
+```bash
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json > /dev/null <<EOF
+{
+  "registry-mirrors": [
+    "https://docker.m.daocloud.io",
+    "https://docker.1panel.live"
+  ]
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
 sudo docker --version
 ```
+
 
 ### 2. 下载并解压
 
 ```bash
 cd ~
-wget -O qmsgnt.zip https://github.com/1244453393/QmsgNtClient-NapCatQQ/releases/download/v1.0.23/QmsgNtClient-NapCatQQ-Linux-Docker_amd64.zip
-unzip qmsgnt.zip -d qmsgnt
-cd ~/qmsgnt/qmsgnt
+wget -O qmsgnt.zip https://ghproxy.net/https://github.com/1244453393/QmsgNtClient-NapCatQQ/releases/download/v1.0.23/QmsgNtClient-NapCatQQ-Linux-Docker_amd64.zip
+unzip qmsgnt.zip
+cd ~/qmsgnt
 ```
 
 ### 3. 修改配置
@@ -36,13 +52,13 @@ chmod +x *.sh
 
 ### 4. 安装依赖
 
-安装完成后需要去安全组中放行6099端口
+安装完成后需要去防火墙中放行6099端口
 
 ```bash
 sudo ./qmsgnt_install.sh
 ```
 
-### 5. 修复路径并设置Token
+### 5. 修复路径
 
 ```bash
 sudo docker rm -f qmsgnt 2>/dev/null
@@ -59,7 +75,7 @@ sudo docker build --no-cache -t qmsgnt -f Dockerfile .
 将下方命令中的 `2187195199` 替换为你要登录的机器人QQ
 
 ```bash
-mkdir -p ../QQ ../config ../logs
+mkdir -p QQ config logs
 
 sudo docker run --restart=always -d \
   --name qmsgnt \
@@ -92,12 +108,17 @@ http://你的服务器公网IP:6099/webui
 
 ### 8. 配置并上传push.py
 
-配置完 push.py 后，将文件上传到 /home/admin/yaya_push
+创建 yaya_push 文件夹
+```bash
+mkdir -p ~/yaya_push
+```
+配置完 push.py 后，将文件上传到 yaya_push 文件夹
+
 
 ### 9. 后台运行push.py
 
 ```bash
-cd /home/admin/yaya_push
+cd ~/yaya_push
 nohup python3 push.py > push.log 2>&1 &
 tail -f push.log
 ```
