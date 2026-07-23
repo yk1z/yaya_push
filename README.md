@@ -128,6 +128,8 @@ mkdir -p ~/yaya_push
 cd ~/yaya_push
 python3 push.py
 ```
-运行后输入 5 启动后台推送
+运行后输入 5 配置Qmsg KEY和口袋账号Token
 
-启动后可使用菜单进行自由配置
+配置完成后输入 6 启动后台推送
+
+启动后可使用菜单配置需要推送的成员
