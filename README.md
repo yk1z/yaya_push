@@ -7,6 +7,9 @@
 严禁用于商业用途，禁止使用本项目进行任何盈利活动。
 
 ## 使用教程
+
+### Qmsg部分
+
 ### 1. 安装Docker
 
 ```bash
@@ -106,19 +109,25 @@ http://你的服务器公网IP:6099/webui
 
 登录后在插件管理中启用QmsgNtClient，并在插件配置中输入Qmsg Key
 
-### 8. 配置并上传push.py
+---
+
+### 牙牙推送部分
+
+### 1. 上传push.py
 
 创建 yaya_push 文件夹
 ```bash
 mkdir -p ~/yaya_push
 ```
-配置完 push.py 后，将文件上传到 yaya_push 文件夹
+将文件上传到 yaya_push 文件夹中
 
 
-### 9. 后台运行push.py
+### 2. 运行push.py
 
 ```bash
 cd ~/yaya_push
-nohup python3 push.py > push.log 2>&1 &
-tail -f push.log
+python3 push.py
 ```
+运行后输入 5 启动后台推送
+
+启动后可使用菜单进行自由配置
