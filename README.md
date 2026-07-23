@@ -128,6 +128,9 @@ mkdir -p ~/yaya_push
 cd ~/yaya_push
 python3 push.py
 ```
+
+<img width="343" height="301" alt="ScreenShot_2026-07-23_190502_441" src="https://github.com/user-attachments/assets/07a6ad16-530f-4f69-8c02-824e0e6acf89" />
+
 运行后输入 5 配置Qmsg KEY和口袋账号Token
 
 配置完成后输入 6 启动后台推送
