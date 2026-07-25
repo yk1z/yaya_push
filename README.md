@@ -10,6 +10,10 @@
 
 ### Qmsg部分
 
+### 官方教程 https://qmsg.zendee.cn/docs/pvt/
+
+或
+
 ### 1. 安装Docker
 
 ```bash
