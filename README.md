@@ -1,143 +1,92 @@
 # 简介
-通过 [Qmsg](https://github.com/1244453393/QmsgNtClient-NapCatQQ) 推送成员口袋房间消息到QQ
 
+通过 NapCat 的 OneBot HTTP 接口推送成员口袋房间消息到 QQ。
+
+## 免责声明
+
+本项目为 Python 学习交流的开源非营利项目，仅作相互学习交流之用。
+
+严禁用于商业用途，禁止使用本项目进行任何盈利活动。
 
 ## 使用教程
 
-### Qmsg部分
+### NapCat 部分
 
-### 官方教程 https://qmsg.zendee.cn/docs/pvt/
+### 1. 准备 NapCat
 
-或
+先准备一个已经登录机器人 QQ 的 NapCat。可以使用你现有的 NapCat WebUI，也可以按 NapCat 官方方式部署。
 
-### 1. 安装Docker
-
-```bash
-sudo yum install -y docker wget unzip || (sudo apt update && sudo apt install -y docker.io wget unzip)
-sudo systemctl enable --now docker
-```
-
-如果国内服务器拉取镜像超时，可配置镜像加速
-```bash
-sudo mkdir -p /etc/docker
-sudo tee /etc/docker/daemon.json > /dev/null <<EOF
-{
-  "registry-mirrors": [
-    "https://docker.m.daocloud.io",
-    "https://docker.1panel.live"
-  ]
-}
-EOF
-sudo systemctl daemon-reload
-sudo systemctl restart docker
-sudo docker --version
-```
-
-
-### 2. 下载并解压
-
-```bash
-cd ~
-wget -O qmsgnt.zip https://ghproxy.net/https://github.com/1244453393/QmsgNtClient-NapCatQQ/releases/download/v1.0.23/QmsgNtClient-NapCatQQ-Linux-Docker_amd64.zip
-unzip qmsgnt.zip
-cd ~/qmsgnt
-```
-
-### 3. 修改配置
-
-将下方命令中的 `2187195199` 替换为你要登录的机器人QQ
-
-```bash
-sed -i 's/^WEBUI_PORT=.*/WEBUI_PORT=6099/' qmsgnt_install.sh
-sed -i 's/^ACCOUNT=.*/ACCOUNT=2187195199/' qmsgnt_install.sh
-chmod +x *.sh
-```
-
-### 4. 安装依赖
-
-安装完成后需要去防火墙中放行6099端口
-
-```bash
-sudo ./qmsgnt_install.sh
-```
-
-### 5. 修复路径
-
-```bash
-sudo docker rm -f qmsgnt 2>/dev/null
-
-sed -i 's#-d ./QmsgNtClient-NapCatQQ#-d /usr/src/app#' Dockerfile
-sed -i 's#-d /tmp/QmsgNtClient-NapCatQQ#-d /tmp#' Dockerfile
-
-sudo docker build --no-cache -t qmsgnt -f Dockerfile .
-```
-
-
-### 6. 启动容器
-
-将下方命令中的 `2187195199` 替换为你要登录的机器人QQ
-
-```bash
-mkdir -p QQ config logs
-
-sudo docker run --restart=always -d \
-  --name qmsgnt \
-  -e ACCOUNT=2187195199 \
-  -p 6099:6099 \
-  -v /home/admin/qmsgnt/QQ:/root/.config/QQ \
-  -v /home/admin/qmsgnt/config:/usr/src/app/QmsgNtClient-NapCatQQ/config \
-  -v /home/admin/qmsgnt/logs:/usr/src/app/QmsgNtClient-NapCatQQ/logs \
-  qmsgnt
-```
-
-
-### 7. 登录WebUI
-
-获取登录Token
-
-```bash
-sudo docker logs qmsgnt | grep -i token
-```
-
-进入WebUI登录
+进入 NapCat WebUI 后，在左侧打开 `网络配置`，添加或启用一个 `HTTP Server`：
 
 ```text
-http://你的服务器公网IP:6099/webui
+启用: 开
+Host: 127.0.0.1
+Port: 3000
+消息格式: Array
+Token: 自己设置一个 access_token，或仅本机使用时留空
 ```
 
-输入刚才设置的Token，即可进入WebUI并登录
+如果牙牙推送脚本和 NapCat 不在同一台机器，Host 可改为 `0.0.0.0`，并且必须用防火墙只允许牙牙推送服务器访问 3000 端口。
 
-登录后在插件管理中启用QmsgNtClient，并在插件配置中输入Qmsg Key
+### 2. 测试 NapCat 接口
 
----
+有 Token 时：
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer 你的NapCatToken" \
+  -H "Content-Type: application/json" \
+  -d "{}" \
+  http://127.0.0.1:3000/get_status
+```
+
+无 Token 时：
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d "{}" \
+  http://127.0.0.1:3000/get_status
+```
+
+返回 JSON 且 `retcode` 为 `0`，说明 NapCat HTTP 接口可用。
 
 ### 牙牙推送部分
 
-### 1. 上传push.py
+### 1. 上传 push.py
 
-创建 yaya_push 文件夹
+创建 yaya_push 文件夹：
+
 ```bash
 mkdir -p ~/yaya_push
 ```
-将文件上传到 yaya_push 文件夹中
 
+将 `push.py` 上传到 `~/yaya_push` 文件夹中。
 
-### 2. 运行push.py
+### 2. 运行 push.py
 
 ```bash
 cd ~/yaya_push
 python3 push.py
 ```
 
-<img width="343" height="301" alt="ScreenShot_2026-07-23_190502_441" src="https://github.com/user-attachments/assets/07a6ad16-530f-4f69-8c02-824e0e6acf89" />
+运行后输入 `5` 配置密钥：
 
-运行后输入 5 配置Qmsg KEY和口袋账号Token
+```text
+NapCat HTTP API: http://127.0.0.1:3000
+NapCat Access Token: 你的 NapCat Token，未设置则留空
+口袋账号Token: 你的口袋账号 Token
+```
 
-配置完成后输入 6 启动后台推送
+配置完成后输入 `6` 启动后台推送。
 
-启动后可使用菜单配置需要推送的成员
+启动后可使用菜单配置需要推送的成员。
 
+### 3. 测试推送
 
-## 免责声明
+推送每个已配置成员目标房间的最新 1 条消息：
 
-本项目为开源非营利项目，仅作相互学习交流之用，严禁用于商业用途，禁止使用本项目进行任何盈利活动。
+```bash
+cd ~/yaya_push
+python3 push.py --test --test-limit 1
+```

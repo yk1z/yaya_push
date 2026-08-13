@@ -7,10 +7,10 @@ import argparse
 import sys
 import subprocess
 import signal
-from urllib.parse import quote
 
-QMSG_KEY = "" 
 USER_TOKEN = "" 
+NAPCAT_API_URL = ""
+NAPCAT_ACCESS_TOKEN = ""
 CHECK_INTERVAL = 1  
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -18,6 +18,7 @@ CACHE_FILE = os.path.join(BASE_DIR, "msg_cache.json")
 CONFIG_FILE = os.path.join(BASE_DIR, "push_config.json")
 LOG_FILE = os.path.join(BASE_DIR, "push.log")
 PID_FILE = os.path.join(BASE_DIR, "push.pid")
+STATUS_FILE = os.path.join(BASE_DIR, "push_status.json")
 MEMBER_DATA_URL = "https://data.gnz.hk/members.json"
 
 DEFAULT_PUSH_MODE = ""  
@@ -36,6 +37,7 @@ last_msg_cache = {}
 member_table_cache = []
 room_name_cache = {}
 config_file_mtime = None
+STATUS_HISTORY_LIMIT = 100
 
 def load_cache():
     """从本地文件持久化加载缓存"""
@@ -60,6 +62,193 @@ def save_cache():
             json.dump(last_msg_cache, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"\n保存缓存文件失败: {e}")
+
+
+def get_empty_status():
+    return {
+        "version": 1,
+        "updated_at": get_current_datetime(),
+        "members": [],
+        "recent_pushes": [],
+        "stats": {
+            "configured_members": 0,
+            "total_pushes": 0,
+        },
+    }
+
+
+def load_status():
+    if not os.path.exists(STATUS_FILE):
+        return get_empty_status()
+    try:
+        with open(STATUS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            data.setdefault("members", [])
+            data.setdefault("recent_pushes", [])
+            data.setdefault("stats", {})
+            data["stats"].setdefault("configured_members", len(data["members"]))
+            data["stats"].setdefault("total_pushes", len(data["recent_pushes"]))
+            return data
+    except Exception as e:
+        print(f"\n读取状态文件失败，将重建状态: {e}")
+    return get_empty_status()
+
+
+def save_status(status):
+    status["updated_at"] = get_current_datetime()
+    tmp_file = f"{STATUS_FILE}.tmp"
+    try:
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(status, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_file, STATUS_FILE)
+    except Exception as e:
+        print(f"\n保存状态文件失败: {e}")
+        return
+
+
+def mask_target(value):
+    value = str(value or "")
+    if len(value) <= 4:
+        return value
+    return f"{value[:2]}***{value[-2:]}"
+
+
+def trim_status_text(value, limit=240):
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    return text[: limit - 1] + "…" if len(text) > limit else text
+
+
+def parse_napcat_response(response):
+    raw_text = trim_status_text(response.text or "", 220)
+    if response.status_code >= 400:
+        return False, f"HTTP {response.status_code}: {raw_text or '空响应'}"
+    try:
+        data = response.json()
+    except ValueError:
+        return True, f"接口返回非 JSON，按 HTTP {response.status_code} 成功处理: {raw_text or '空响应'}"
+
+    retcode = data.get("retcode")
+    status = str(data.get("status") or "").lower()
+    if retcode in (0, "0") or status in ("ok", "async"):
+        message_id = (data.get("data") or {}).get("message_id") if isinstance(data.get("data"), dict) else None
+        return True, f"NapCat message_id={message_id}" if message_id else "NapCat 直连成功"
+    return False, str(data.get("wording") or data.get("message") or data)
+
+
+def get_status_push_target(member_config, room_config):
+    push_mode, target_qq = get_push_target(member_config, room_config)
+    return {
+        "push_mode": push_mode,
+        "target_qq": mask_target(target_qq),
+    }
+
+
+def summarize_status_member(member_config, previous=None):
+    previous = previous or {}
+    rooms = []
+    for channel_id, room_config in (member_config.get("rooms") or {}).items():
+        room = normalize_room(room_config)
+        rooms.append({
+            "channel_id": str(channel_id),
+            "name": room.get("name") or str(channel_id),
+            **get_status_push_target(member_config, room),
+        })
+
+    return {
+        "name": member_config.get("name") or member_config.get("member_name") or "",
+        "member_id": str(member_config.get("member_id") or ""),
+        "server_id": str(member_config.get("server_id") or ""),
+        "rooms": rooms,
+        "last_seen_at": previous.get("last_seen_at") or "",
+        "last_pushed_at": previous.get("last_pushed_at") or "",
+        "last_message": previous.get("last_message") or "",
+        "last_room": previous.get("last_room") or "",
+        "push_count": int(previous.get("push_count") or 0),
+        "error": previous.get("error") or "",
+    }
+
+
+def update_configured_members_status(member_configs):
+    status = load_status()
+    previous_by_key = {
+        (member.get("member_id") or member.get("name")): member
+        for member in status.get("members", [])
+        if isinstance(member, dict)
+    }
+    members = []
+    for member_config in member_configs:
+        key = str(member_config.get("member_id") or member_config.get("name") or "")
+        members.append(summarize_status_member(member_config, previous_by_key.get(key)))
+
+    status["members"] = members
+    status["stats"]["configured_members"] = len(members)
+    save_status(status)
+
+
+def record_member_error(member_config, error):
+    status = load_status()
+    member_key = str(member_config.get("member_id") or member_config.get("name") or "")
+    for member in status.get("members", []):
+        key = str(member.get("member_id") or member.get("name") or "")
+        if key == member_key:
+            member["error"] = trim_status_text(error, 160)
+            member["last_seen_at"] = get_current_datetime()
+            break
+    save_status(status)
+
+
+def record_push_status(member_config, room_config, sender_nick, content, raw_item=None):
+    status = load_status()
+    now = get_current_datetime()
+    msg_time = get_message_datetime(raw_item)
+    target = get_status_push_target(member_config, room_config)
+    event = {
+        "pushed_at": now,
+        "message_time": msg_time,
+        "member_name": member_config.get("name") or "",
+        "member_id": str(member_config.get("member_id") or ""),
+        "room_name": room_config.get("name") or "",
+        "channel_id": str(room_config.get("channel_id") or ""),
+        "sender": get_message_sender_real_name(raw_item or {}, fallback_name=sender_nick) if raw_item else str(sender_nick or ""),
+        "content": trim_status_text(parse_msg_content(content, raw_item=raw_item)),
+        **target,
+    }
+
+    status["recent_pushes"] = [event] + [
+        item for item in status.get("recent_pushes", []) if isinstance(item, dict)
+    ]
+    status["recent_pushes"] = status["recent_pushes"][:STATUS_HISTORY_LIMIT]
+    status["stats"]["total_pushes"] = int(status["stats"].get("total_pushes") or 0) + 1
+
+    member_key = str(member_config.get("member_id") or member_config.get("name") or "")
+    member_found = False
+    for member in status.get("members", []):
+        key = str(member.get("member_id") or member.get("name") or "")
+        if key != member_key:
+            continue
+        member["last_seen_at"] = now
+        member["last_pushed_at"] = now
+        member["last_message"] = event["content"]
+        member["last_room"] = event["room_name"]
+        member["push_count"] = int(member.get("push_count") or 0) + 1
+        member["error"] = ""
+        member_found = True
+        break
+
+    if not member_found:
+        summary = summarize_status_member(member_config)
+        summary.update({
+            "last_seen_at": now,
+            "last_pushed_at": now,
+            "last_message": event["content"],
+            "last_room": event["room_name"],
+            "push_count": 1,
+        })
+        status["members"].append(summary)
+        status["stats"]["configured_members"] = len(status["members"])
+
+    save_status(status)
 
 
 def load_config():
@@ -109,36 +298,47 @@ def mask_secret(value):
 
 
 def apply_runtime_config():
-    global QMSG_KEY, USER_TOKEN
+    global USER_TOKEN, NAPCAT_API_URL, NAPCAT_ACCESS_TOKEN
     data = load_config()
-    qmsg_key = str(data.get("qmsg_key") or QMSG_KEY or "").strip()
     user_token = str(data.get("user_token") or USER_TOKEN or "").strip()
-    QMSG_KEY = qmsg_key
+    napcat_api_url = str(data.get("napcat_api_url") or NAPCAT_API_URL or "").strip().rstrip("/")
+    napcat_access_token = str(data.get("napcat_access_token") or NAPCAT_ACCESS_TOKEN or "").strip()
     USER_TOKEN = user_token
+    NAPCAT_API_URL = napcat_api_url
+    NAPCAT_ACCESS_TOKEN = napcat_access_token
 
 
 def print_secret_config():
     data = load_config()
-    qmsg_key = data.get("qmsg_key") or QMSG_KEY
     user_token = data.get("user_token") or USER_TOKEN
-    print(f"Qmsg KEY: {mask_secret(qmsg_key)}")
+    napcat_api_url = data.get("napcat_api_url") or NAPCAT_API_URL
+    napcat_access_token = data.get("napcat_access_token") or NAPCAT_ACCESS_TOKEN
+    print(f"NapCat HTTP API: {napcat_api_url or '未配置'}")
+    print(f"NapCat Access Token: {mask_secret(napcat_access_token)}")
     print(f"口袋账号Token: {mask_secret(user_token)}")
 
 
 def interactive_update_secrets():
     data = load_config()
-    current_qmsg = str(data.get("qmsg_key") or QMSG_KEY or "").strip()
     current_token = str(data.get("user_token") or USER_TOKEN or "").strip()
+    current_napcat_api_url = str(data.get("napcat_api_url") or NAPCAT_API_URL or "").strip()
+    current_napcat_access_token = str(data.get("napcat_access_token") or NAPCAT_ACCESS_TOKEN or "").strip()
 
     print_secret_config()
     print("直接回车表示保持不变。")
-    qmsg_key = input("新的 Qmsg KEY: ").strip()
+    napcat_api_url = input("新的 NapCat HTTP API，例如 http://127.0.0.1:3000: ").strip()
+    napcat_access_token = input("新的 NapCat Access Token: ").strip()
     user_token = input("新的 口袋账号Token: ").strip()
 
-    if qmsg_key:
-        data["qmsg_key"] = qmsg_key
-    elif "qmsg_key" not in data and current_qmsg:
-        data["qmsg_key"] = current_qmsg
+    if napcat_api_url:
+        data["napcat_api_url"] = napcat_api_url.rstrip("/")
+    elif "napcat_api_url" not in data and current_napcat_api_url:
+        data["napcat_api_url"] = current_napcat_api_url.rstrip("/")
+
+    if napcat_access_token:
+        data["napcat_access_token"] = napcat_access_token
+    elif "napcat_access_token" not in data and current_napcat_access_token:
+        data["napcat_access_token"] = current_napcat_access_token
 
     if user_token:
         data["user_token"] = user_token
@@ -178,7 +378,12 @@ def find_config_member_indexes(members, name):
 
 
 def add_config_member(args):
-    members = load_config_members()
+    config = load_config()
+    members = [
+        dict(member)
+        for member in config.get("members", [])
+        if isinstance(member, dict)
+    ]
     name = str(args.add_member or "").strip()
     if not name:
         raise RuntimeError("请提供成员名字")
@@ -213,6 +418,7 @@ def add_config_member(args):
 
 def remove_config_member(name, target_qq=None):
     members = load_config_members()
+    config = load_config()
     if target_qq is None:
         indexes = find_config_member_indexes(members, name)
         if len(indexes) > 1:
@@ -230,6 +436,22 @@ def remove_config_member(name, target_qq=None):
     save_config_members(members)
     print(f"已删除成员: {removed.get('name')}")
     print(f"配置文件: {CONFIG_FILE}")
+
+
+def normalize_member_config_for_compare(member):
+    return {
+        "name": str(member.get("name") or "").strip(),
+        "push_mode": member.get("push_mode") or DEFAULT_PUSH_MODE,
+        "target_qq": str(member.get("target_qq") or DEFAULT_TARGET_QQ),
+        "push_big_room": member.get("push_big_room", True) is not False,
+        "push_small_room": member.get("push_small_room", True) is not False,
+    }
+
+
+def members_config_equal(left, right):
+    left_data = [normalize_member_config_for_compare(member) for member in left if isinstance(member, dict)]
+    right_data = [normalize_member_config_for_compare(member) for member in right if isinstance(member, dict)]
+    return json.dumps(left_data, ensure_ascii=False, sort_keys=True) == json.dumps(right_data, ensure_ascii=False, sort_keys=True)
 
 
 def print_config_members():
@@ -342,7 +564,12 @@ def prompt_member_index(members, prompt="请选择成员"):
 
 
 def interactive_add_or_update_member():
-    members = load_config_members()
+    config = load_config()
+    members = [
+        dict(member)
+        for member in config.get("members", [])
+        if isinstance(member, dict)
+    ]
     name = prompt_text("成员名字")
     if not name:
         print("已取消")
@@ -420,7 +647,12 @@ def interactive_remove_member():
 
 
 def interactive_toggle_member_rooms():
-    members = load_config_members()
+    config = load_config()
+    members = [
+        dict(member)
+        for member in config.get("members", [])
+        if isinstance(member, dict)
+    ]
     index = prompt_member_index(members, "选择要修改房间开关的成员")
     if index == MENU_BACK:
         print("已返回主菜单")
@@ -931,6 +1163,7 @@ def reload_members_from_config(force=False, keep_on_error=True):
 
     MEMBERS = resolved_members
     config_file_mtime = current_mtime
+    update_configured_members_status(MEMBERS)
     if not force:
         print(f"\n[{get_current_datetime()}] 已热加载配置: {' '.join([m['name'] for m in MEMBERS])}")
     return True
@@ -1266,8 +1499,54 @@ def find_first_media_url(data, media_type="image"):
     return ""
 
 
-def encode_qmsg_image_url(url):
-    return quote(str(url), safe=":/?&")
+def has_napcat_config():
+    return bool(str(NAPCAT_API_URL or "").strip())
+
+
+def normalize_qq_id(value):
+    text = str(value or "").strip()
+    return int(text) if text.isdigit() else text
+
+
+def escape_cq_param(value):
+    text = str(value or "")
+    return (
+        text.replace("&", "&amp;")
+        .replace("[", "&#91;")
+        .replace("]", "&#93;")
+        .replace(",", "&#44;")
+    )
+
+
+def build_onebot_image_segment(url):
+    return f"[CQ:image,file={escape_cq_param(url)}]"
+
+
+def send_napcat_direct(push_mode, target_qq, msg_body):
+    if not has_napcat_config():
+        return False, "未配置 NapCat HTTP API"
+
+    if push_mode == "group":
+        url = f"{NAPCAT_API_URL}/send_group_msg"
+        payload = {
+            "group_id": normalize_qq_id(target_qq),
+            "message": str(msg_body or ""),
+            "auto_escape": False,
+        }
+    else:
+        url = f"{NAPCAT_API_URL}/send_private_msg"
+        payload = {
+            "user_id": normalize_qq_id(target_qq),
+            "message": str(msg_body or ""),
+            "auto_escape": False,
+        }
+
+    headers = {"Content-Type": "application/json;charset=utf-8"}
+    if NAPCAT_ACCESS_TOKEN:
+        headers["Authorization"] = f"Bearer {NAPCAT_ACCESS_TOKEN}"
+
+    res = requests.post(url, headers=headers, json=payload, timeout=10)
+    return parse_napcat_response(res)
 
 
 def normalize_room(room_config):
@@ -1336,6 +1615,7 @@ def get_member_rooms(member_config):
     }
     channel_names = fetch_server_channel_names(member_config)
     for channel_id, room_config in rooms.items():
+        room_config["channel_id"] = str(channel_id)
         channel_name = channel_names.get(str(channel_id))
         if channel_name and should_replace_room_name(room_config, channel_id):
             room_config["name"] = channel_name
@@ -1760,7 +2040,7 @@ def get_reply_member_content(parsed, reply_info, raw_item=None):
         if not media_url:
             continue
         if media_type == "image":
-            return f"@image={encode_qmsg_image_url(media_url)}@"
+                    return build_onebot_image_segment(media_url)
         return f"[{label}] {media_url}"
 
     return ""
@@ -1795,7 +2075,7 @@ def parse_msg_content(raw_content, raw_item=None):
         if "[图片消息]" in raw_text or msg_type in IMAGE_MSG_TYPES:
             image_url = find_first_media_url(parsed_content, media_type="image") or find_first_media_url(raw_item, media_type="image")
             if image_url:
-                return f"@image={encode_qmsg_image_url(image_url)}@"
+                return build_onebot_image_segment(image_url)
             return "[图片消息] 未找到图片链接"
 
         if "[语音消息]" in raw_text or msg_type in AUDIO_MSG_TYPES:
@@ -1824,7 +2104,7 @@ def parse_msg_content(raw_content, raw_item=None):
                     return f"[视频消息] {video_url}"
             image_url = find_first_media_url(parsed_content, media_type="image")
             if image_url:
-                return f"@image={encode_qmsg_image_url(image_url)}@"
+                return build_onebot_image_segment(image_url)
             audio_url = find_first_media_url(parsed_content, media_type="audio")
             if audio_url:
                 return f"[语音消息] {audio_url}"
@@ -1847,7 +2127,7 @@ def format_sender_label(sender_nick, member_name):
     return nick or real_name
 
 
-def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=False, raw_item=None):
+def send_napcat_rich(member_config, room_config, sender_nick, content, is_live=False, raw_item=None):
     member_name = member_config["name"]
     room_name = room_config["name"]
     push_mode, target_qq = get_push_target(member_config, room_config)
@@ -1856,8 +2136,8 @@ def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=Fal
     sender_real_name = get_message_sender_real_name(raw_item or {}, fallback_name=member_name)
     sender_label = format_sender_label(sender_nick, sender_real_name)
 
-    if not QMSG_KEY:
-        print(" 失败: 请先填写 Qmsg KEY")
+    if not has_napcat_config():
+        print(" 失败: 请先配置 NapCat HTTP API")
         return
     if not target_qq:
         print(f" 失败: {member_name}/{room_name} 未配置 target_qq")
@@ -1942,7 +2222,7 @@ def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=Fal
             elif video_url:
                 member_reply = f"[视频消息] {video_url}"
             elif image_url:
-                member_reply = f"@image={encode_qmsg_image_url(image_url)}@"
+                member_reply = build_onebot_image_segment(image_url)
             else:
                 member_reply = "[未识别礼物回复正文]"
             msg_body = (
@@ -1968,7 +2248,7 @@ def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=Fal
         api_title, api_cover, live_type = get_live_detail(member_config)
         live_title = live_title or api_title
         live_cover = fix_url(live_cover) or api_cover
-        cover_code = f"@image={encode_qmsg_image_url(live_cover)}@" if live_cover else ""
+        cover_code = build_onebot_image_segment(live_cover) if live_cover else ""
         msg_body = (
             f"【{room_name} | {member_name}】\n"
             f"{member_name}直播啦~\n"
@@ -1986,20 +2266,16 @@ def send_qmsg_rich(member_config, room_config, sender_nick, content, is_live=Fal
             f"{msg_time}"
         )
 
-    if push_mode == "group":
-        url = f"https://qmsg.zendee.cn/jgroup/{QMSG_KEY}"
-    else:
-        url = f"https://qmsg.zendee.cn/jsend/{QMSG_KEY}"
-
     try:
-        res = requests.post(url, json={"msg": msg_body, "qq": target_qq}, timeout=5)
-        res_data = res.json()
-        if res_data.get("success"):
-            print("成功")
-        else:
-            print(f"失败: {res_data.get('reason')}")
+        ok, detail = send_napcat_direct(push_mode, target_qq, msg_body)
+        if ok:
+            suffix = f"（{detail}）" if detail else ""
+            print(f"成功{suffix}")
+            record_push_status(member_config, room_config, sender_nick, content, raw_item=raw_item)
+            return
+        print(f"失败: NapCat失败: {detail}")
     except Exception as e:
-        print(f"网络异常: {e}")
+        print(f"失败: NapCat网络异常: {e}")
 
 
 def get_message_payload(member_config, rooms, item):
@@ -2180,7 +2456,7 @@ def monitor_member(member_config, is_silent_init=False):
 
                 print("\n" + "-" * 30)
                 print(f"[{get_current_datetime()}] {member_config['name']} 新动态: {content}")
-                send_qmsg_rich(member_config, room_config, star_name, content, is_live=is_live_msg, raw_item=raw_item)
+                send_napcat_rich(member_config, room_config, star_name, content, is_live=is_live_msg, raw_item=raw_item)
                 print("-" * 30 + "\n")
 
             if room_cache_key not in last_msg_cache:
@@ -2200,8 +2476,10 @@ def monitor_member(member_config, is_silent_init=False):
 
     except RuntimeError as e:
         print(f"\n[{get_current_datetime()}] {member_config['name']} 业务提示: {e}")
+        record_member_error(member_config, str(e))
     except Exception as e:
         print(f"\n[{get_current_datetime()}] {member_config['name']} 发生网络或未知异常: {e}")
+        record_member_error(member_config, str(e))
 
 
 def monitor_once(is_silent_init=False):
@@ -2231,7 +2509,7 @@ def test_push_latest_once(limit=10):
 
                 print("\n" + "-" * 30)
                 print(f"[{index}/{len(latest_candidates)}] {member_config['name']} 测试推送: {content}")
-                send_qmsg_rich(member_config, room_config, star_name, content, is_live=is_live_msg, raw_item=raw_item)
+                send_napcat_rich(member_config, room_config, star_name, content, is_live=is_live_msg, raw_item=raw_item)
                 print("-" * 30 + "\n")
                 time.sleep(0.8)
 
@@ -2265,6 +2543,37 @@ def debug_latest_messages():
 
         except Exception as e:
             print(f"{member_config['name']} 调试失败: {e}")
+
+
+def print_push_status():
+    status = load_status()
+    print("=" * 50)
+    print("当前推送状态")
+    print("=" * 50)
+    print(f"更新时间: {status.get('updated_at') or '暂无'}")
+    print(f"配置成员: {status.get('stats', {}).get('configured_members', len(status.get('members', [])))}")
+    print(f"累计推送: {status.get('stats', {}).get('total_pushes', len(status.get('recent_pushes', [])))}")
+
+    for index, member in enumerate(status.get("members", []), start=1):
+        rooms = "、".join([room.get("name") or room.get("channel_id") for room in member.get("rooms", [])])
+        last_message = member.get("last_message") or "暂无推送"
+        print(
+            f"{index}. {member.get('name')} "
+            f"房间: {rooms or '未配置'} "
+            f"最后推送: {member.get('last_pushed_at') or '暂无'} "
+            f"内容: {last_message}"
+        )
+
+    recent = status.get("recent_pushes", [])[:10]
+    if recent:
+        print("-" * 50)
+        print("最近推送")
+        for item in recent:
+            print(
+                f"{item.get('pushed_at')} "
+                f"{item.get('member_name')}/{item.get('room_name')}: "
+                f"{item.get('content')}"
+            )
 
 
 def start_monitor_from_config(return_to_menu=False):
@@ -2318,6 +2627,7 @@ def main():
     parser.add_argument("--find-member", help="按姓名/拼音搜索内置成员表")
     parser.add_argument("--menu", action="store_true", help="打开交互式配置菜单")
     parser.add_argument("--run", action="store_true", help="开始监控推送")
+    parser.add_argument("--status", action="store_true", help="查看当前推送状态")
     parser.add_argument("--list-config", action="store_true", help="列出当前推送成员配置")
     parser.add_argument("--add-member", help="添加或更新推送成员，例如 --add-member 陈琳 --target-qq 829068921")
     parser.add_argument("--remove-member", help="从推送配置中删除成员")
@@ -2353,6 +2663,10 @@ def main():
 
     if args.list_config:
         print_config_members()
+        return
+
+    if args.status:
+        print_push_status()
         return
 
     if not (args.run or args.test or args.debug_latest):
