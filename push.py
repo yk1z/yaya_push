@@ -1522,6 +1522,14 @@ def build_onebot_image_segment(url):
     return f"[CQ:image,file={escape_cq_param(url)}]"
 
 
+def build_onebot_record_segment(url):
+    return f"[CQ:record,file={escape_cq_param(url)}]"
+
+
+def build_onebot_video_segment(url):
+    return f"[CQ:video,file={escape_cq_param(url)}]"
+
+
 def send_napcat_direct(push_mode, target_qq, msg_body):
     if not has_napcat_config():
         return False, "未配置 NapCat HTTP API"
@@ -2040,8 +2048,10 @@ def get_reply_member_content(parsed, reply_info, raw_item=None):
         if not media_url:
             continue
         if media_type == "image":
-                    return build_onebot_image_segment(media_url)
-        return f"[{label}] {media_url}"
+            return build_onebot_image_segment(media_url)
+        if media_type == "audio":
+            return build_onebot_record_segment(media_url)
+        return build_onebot_video_segment(media_url)
 
     return ""
 
@@ -2081,16 +2091,16 @@ def parse_msg_content(raw_content, raw_item=None):
         if "[语音消息]" in raw_text or msg_type in AUDIO_MSG_TYPES:
             audio_url = find_first_media_url(parsed_content, media_type="audio") or find_first_media_url(raw_item, media_type="audio")
             if audio_url:
-                return f"[语音消息] {audio_url}"
+                return build_onebot_record_segment(audio_url)
             return raw_text
 
         if "[视频消息]" in raw_text or msg_type in VIDEO_MSG_TYPES:
             video_url = find_first_media_url(parsed_content, media_type="video") or find_first_media_url(raw_item, media_type="video")
             if video_url:
-                return f"[视频消息] {video_url}"
+                return build_onebot_video_segment(video_url)
             cover_url = find_first_media_url(parsed_content, media_type="image") or find_first_media_url(raw_item, media_type="image")
             if cover_url:
-                return f"[视频消息] {cover_url}"
+                return build_onebot_image_segment(cover_url)
             return "[视频消息] 未找到视频链接"
 
         if parsed_content is not None and not isinstance(parsed_content, str):
@@ -2101,16 +2111,16 @@ def parse_msg_content(raw_content, raw_item=None):
             ):
                 video_url = find_first_media_url(parsed_content, media_type="video")
                 if video_url:
-                    return f"[视频消息] {video_url}"
+                    return build_onebot_video_segment(video_url)
             image_url = find_first_media_url(parsed_content, media_type="image")
             if image_url:
                 return build_onebot_image_segment(image_url)
             audio_url = find_first_media_url(parsed_content, media_type="audio")
             if audio_url:
-                return f"[语音消息] {audio_url}"
+                return build_onebot_record_segment(audio_url)
             video_url = find_first_media_url(parsed_content, media_type="video")
             if video_url:
-                return f"[视频消息] {video_url}"
+                return build_onebot_video_segment(video_url)
             text = extract_text_value(parsed_content)
             if text:
                 return text
@@ -2218,9 +2228,9 @@ def send_napcat_rich(member_config, room_config, sender_nick, content, is_live=F
             if member_reply:
                 pass
             elif voice_url:
-                member_reply = f"[语音消息] {voice_url}"
+                member_reply = build_onebot_record_segment(voice_url)
             elif video_url:
-                member_reply = f"[视频消息] {video_url}"
+                member_reply = build_onebot_video_segment(video_url)
             elif image_url:
                 member_reply = build_onebot_image_segment(image_url)
             else:
