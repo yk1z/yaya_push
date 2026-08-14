@@ -2,6 +2,8 @@
 
 通过 NapCat 的 OneBot HTTP 接口推送成员口袋房间消息到 QQ。
 
+项目无偿提供推送服务，可以无需自行搭建。  [申请](https://push.gnz.hk/apply)
+
 ## 免责声明
 
 本项目为 Python 学习交流的开源非营利项目，仅作相互学习交流之用。
